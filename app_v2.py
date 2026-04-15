@@ -14,7 +14,7 @@ import time
 if "GOOGLE_API_KEY" in st.secrets:
     MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
 else:
-    MY_API_KEY = "AIzaSyBOWAqxkAKxBBNkUy2-Fck_PkTqZlL6gIQ" # 本地測試用
+    MY_API_KEY = "AIzaSyBwzvW898kUFdaLfy7cZxNoTZ4ESfu6qnw" # 本地測試用
 
 DB_NAME = "finance.db"
 
