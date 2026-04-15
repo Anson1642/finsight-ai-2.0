@@ -63,6 +63,37 @@ def process_user_input(user_text, df):
         return json.loads(match.group(0)) if match else None
     except: return None
 
+# 處理使用者輸入的對話框邏輯
+        if user_text := st.chat_input("Log expense or ask..."):
+            # 1. 顯示並存入用戶訊息
+            st.chat_message("user").markdown(user_text)
+            st.session_state.messages.append({"role": "user", "content": user_text})
+            
+            # 2. 呼叫 AI
+            with st.spinner("AI is thinking..."):
+                res = process_user_input(user_text, df)
+                
+                # 3. 根據意圖分類處理
+                if res:
+                    if res.get("intent") == "log":
+                        # 這是記帳模式
+                        insert_transaction(res['amount'], res['category'], res['description'], username)
+                        reply = f"✅ Logged: ${res['amount']} for {res['category']}"
+                        st.chat_message("assistant").markdown(reply)
+                        st.session_state.messages.append({"role": "assistant", "content": reply})
+                        st.rerun() # 自動重整圖表
+                    
+                    elif res.get("intent") == "chat":
+                        # 這是「分析/詢問」模式
+                        reply = res.get("chat_reply", "I'm not sure about that.")
+                        st.chat_message("assistant").markdown(reply)
+                        st.session_state.messages.append({"role": "assistant", "content": reply})
+                    
+                    else:
+                        st.error("AI response format error.")
+                else:
+                    st.error("AI connection failed.")
+                    
 # ==========================================
 # 4. MAIN UI (FULL FEATURED)
 # ==========================================
