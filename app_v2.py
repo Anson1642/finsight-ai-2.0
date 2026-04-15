@@ -5,15 +5,16 @@ import pandas as pd
 import hashlib
 import re
 from google import genai
+import time
 
 # ==========================================
 # 1. CONFIG & SECURITY
 # ==========================================
-# 優先嘗試讀取雲端 Secrets，否則使用硬編碼 Key
+# 在 Streamlit Cloud 的 Secrets 設定 GOOGLE_API_KEY
 if "GOOGLE_API_KEY" in st.secrets:
     MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
 else:
-    MY_API_KEY = "AIzaSyBOWAqxkAKxBBNkUy2-Fck_PkTqZlL6gIQ"
+    MY_API_KEY = "AIzaSyBOWAqxkAKxBBNkUy2-Fck_PkTqZlL6gIQ" # 本地測試用
 
 DB_NAME = "finance.db"
 
@@ -40,71 +41,74 @@ def get_user_transactions(username):
     return df
 
 # ==========================================
-# 3. AI LOGIC ENGINE
+# 3. AI LOGIC ENGINE (Using Gemini 2.0 Flash)
 # ==========================================
 def process_user_input(user_text, df):
-    # 如果 API Key 是空的，直接報錯
-    if not MY_API_KEY or MY_API_KEY == "PASTE_YOUR_API_KEY_HERE":
-        return {"intent": "chat", "chat_reply": "Error: API Key is not set correctly!"}
-
     client = genai.Client(api_key=MY_API_KEY)
-    
-    prompt = f"""You are a Finance Assistant. 
-    User Input: "{user_text}".
-    Return STRICTLY valid JSON.
-    If log expense: {{"intent": "log", "amount": 100, "category": "Food", "description": "lunch"}}
-    If chat/ask: {{"intent": "chat", "chat_reply": "Your helpful answer"}}
-    No markdown, no extra words."""
+    history = df.tail(10).to_string()
+    prompt = f"""You are FinSight AI. Analyze user input: "{user_text}".
+    History: {history}.
+    Task: Respond with JSON only.
+    If log: {{"intent": "log", "amount": 0, "category": "Food", "description": "text"}}
+    If chat: {{"intent": "chat", "chat_reply": "response"}}"""
     
     try:
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        # 用正則抓取 JSON
+        # 切換到 2.0 模型
+        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        else:
-            return {"intent": "chat", "chat_reply": f"AI raw response: {response.text}"}
+        return json.loads(match.group(0)) if match else None
     except Exception as e:
-        return {"intent": "chat", "chat_reply": f"Error: {str(e)}"}
+        # 捕捉 429 錯誤
+        if "429" in str(e):
+            return {"intent": "chat", "chat_reply": "⚠️ API limit reached. Please wait a moment or try again later."}
+        return None
 
 # ==========================================
 # 4. STREAMLIT UI
 # ==========================================
 def main():
-    st.set_page_config(page_title="FinSight", layout="wide")
+    st.set_page_config(page_title="FinSight Pro", layout="wide")
     init_db()
 
-    # 模擬登入 (為了測試，簡化流程)
-    if "username" not in st.session_state: st.session_state.username = "Anson1642"
-    
-    username = st.session_state.username
-    st.title("💰 FinSight AI Assistant")
-    
-    # 顯示聊天紀錄
-    if "messages" not in st.session_state: st.session_state.messages = []
-    for msg in st.session_state.messages: st.chat_message(msg["role"]).markdown(msg["content"])
+    if "logged_in" not in st.session_state: st.session_state.update({"logged_in": False, "username": None})
 
-    # 輸入區
-    if user_text := st.chat_input("Log expense or ask question..."):
-        st.chat_message("user").markdown(user_text)
-        st.session_state.messages.append({"role": "user", "content": user_text})
+    if not st.session_state.logged_in:
+        st.title("💰 FinSight AI - Login")
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type='password')
+        if st.button("Enter"):
+            st.session_state.update({"logged_in": True, "username": user})
+            st.rerun()
+    else:
+        username = st.session_state.username
+        st.sidebar.title(f"Hi, {username}!")
+        if st.sidebar.button("Logout"): st.session_state.update({"logged_in": False, "messages": []}); st.rerun()
         
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                result = process_user_input(user_text, get_user_transactions(username))
-                
-                if result and result.get("intent") == "log":
-                    insert_transaction(result["amount"], result["category"], result["description"], username)
-                    reply = f"✅ Logged: ${result['amount']} for {result['category']}."
-                    st.markdown(reply)
-                    st.session_state.messages.append({"role": "assistant", "content": reply})
-                    st.rerun()
-                elif result:
-                    reply = result.get("chat_reply", "I couldn't understand that.")
-                    st.markdown(reply)
-                    st.session_state.messages.append({"role": "assistant", "content": reply})
-                else:
-                    st.error("AI returned nothing.")
+        df = get_user_transactions(username)
+        
+        with st.sidebar:
+            st.subheader("Spending Chart")
+            if not df.empty: st.bar_chart(df.groupby('category')['amount'].sum())
+
+        st.title("💰 FinSight AI Assistant")
+        if "messages" not in st.session_state: st.session_state.messages = []
+        for msg in st.session_state.messages: st.chat_message(msg["role"]).markdown(msg["content"])
+
+        if user_text := st.chat_input("Log expense or ask question..."):
+            st.chat_message("user").markdown(user_text)
+            st.session_state.messages.append({"role": "user", "content": user_text})
+            
+            res = process_user_input(user_text, df)
+            if res and res.get("intent") == "log":
+                insert_transaction(res['amount'], res['category'], res['description'], username)
+                st.rerun()
+            elif res and res.get("intent") == "chat":
+                st.chat_message("assistant").markdown(res['chat_reply'])
+                st.session_state.messages.append({"role": "assistant", "content": res['chat_reply']})
+            else:
+                st.error("AI connection issue (Rate limit reached?).")
 
 if __name__ == "__main__":
     main()
+
+    
