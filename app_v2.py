@@ -23,7 +23,28 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, description TEXT, username TEXT)''')
+    c.execute("PRAGMA table_info(transactions)")
+    columns = [info[1] for info in c.fetchall()]
+    if 'username' not in columns: c.execute("ALTER TABLE transactions ADD COLUMN username TEXT")
     conn.commit(); conn.close()
+
+def add_user(username, password):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, make_hashes(password)))
+        conn.commit(); return True
+    except: return False
+    finally: conn.close()
+
+def login_user(username, password):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT password FROM users WHERE username = ?", (username,))
+    data = c.fetchone()
+    conn.close()
+    if data and make_hashes(password) == data[0]: return True
+    return False
 
 def insert_transaction(amount, category, description, username):
     conn = sqlite3.connect(DB_NAME)
@@ -37,24 +58,20 @@ def get_user_transactions(username):
     conn.close()
     return df
 
-def clear_user_data(username):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM transactions WHERE username = ?", (username,))
-    conn.commit(); conn.close()
-
 # ==========================================
-# 3. AI ENGINE
+# 3. AI LOGIC ENGINE
 # ==========================================
 def process_user_input(user_text, df):
     client = genai.Client(api_key=MY_API_KEY)
-    history_text = df.tail(10).to_string() if not df.empty else "No history."
+    history_text = df.tail(15).to_string() if not df.empty else "No previous transactions."
     
-    prompt = f"""You are a professional AI Finance Assistant. 
-    History: {history_text}. User Input: "{user_text}".
-    Return STRICTLY valid JSON.
-    If logging expense: {{"intent": "log", "amount": <num>, "category": "<Food/Transport/Housing/Entertainment/Others>", "description": "<text>"}}
-    If chatting/question: {{"intent": "chat", "chat_reply": "<answer>"}}
+    prompt = f"""You are a professional AI Finance Assistant.
+    Transaction History: {history_text}
+    User Input: "{user_text}"
+    
+    Task: Analyze the input and return STRICTLY valid JSON.
+    - If user is logging a new expense: {{"intent": "log", "amount": 0.0, "category": "Food/Transport/Housing/Entertainment/Others", "description": "text"}}
+    - If user is asking a question or analyzing data: {{"intent": "chat", "chat_reply": "Your advice/answer here"}}
     No markdown blocks."""
     
     try:
@@ -63,93 +80,61 @@ def process_user_input(user_text, df):
         return json.loads(match.group(0)) if match else None
     except: return None
 
-# 處理使用者輸入的對話框邏輯
-        if user_text := st.chat_input("Log expense or ask..."):
-            # 1. 顯示並存入用戶訊息
-            st.chat_message("user").markdown(user_text)
-            st.session_state.messages.append({"role": "user", "content": user_text})
-            
-            # 2. 呼叫 AI
-            with st.spinner("AI is thinking..."):
-                res = process_user_input(user_text, df)
-                
-                # 3. 根據意圖分類處理
-                if res:
-                    if res.get("intent") == "log":
-                        # 這是記帳模式
-                        insert_transaction(res['amount'], res['category'], res['description'], username)
-                        reply = f"✅ Logged: ${res['amount']} for {res['category']}"
-                        st.chat_message("assistant").markdown(reply)
-                        st.session_state.messages.append({"role": "assistant", "content": reply})
-                        st.rerun() # 自動重整圖表
-                    
-                    elif res.get("intent") == "chat":
-                        # 這是「分析/詢問」模式
-                        reply = res.get("chat_reply", "I'm not sure about that.")
-                        st.chat_message("assistant").markdown(reply)
-                        st.session_state.messages.append({"role": "assistant", "content": reply})
-                    
-                    else:
-                        st.error("AI response format error.")
-                else:
-                    st.error("AI connection failed.")
-                    
 # ==========================================
-# 4. MAIN UI (FULL FEATURED)
+# 4. MAIN UI (STREAMLIT)
 # ==========================================
 def main():
     st.set_page_config(page_title="FinSight Pro", layout="wide")
     init_db()
 
-    if "logged_in" not in st.session_state: st.session_state.update({"logged_in": False, "username": None})
+    # Session Management
+    if "logged_in" not in st.session_state: st.session_state.update({"logged_in": False, "username": None, "messages": []})
 
     if not st.session_state.logged_in:
-        st.title("💰 FinSight AI Login")
+        st.title("💰 FinSight AI - Login")
+        choice = st.selectbox("Action", ["Login", "Signup"])
         user = st.text_input("Username")
         pwd = st.text_input("Password", type='password')
         if st.button("Enter"):
-            st.session_state.update({"logged_in": True, "username": user})
-            st.rerun()
+            if choice == "Signup" and add_user(user, pwd): st.success("Created! Please Login.")
+            elif choice == "Login" and login_user(user, pwd):
+                st.session_state.update({"logged_in": True, "username": user})
+                st.rerun()
+            else: st.error("Invalid credentials.")
     else:
         username = st.session_state.username
         st.sidebar.title(f"Hi, {username}!")
         if st.sidebar.button("Logout"): st.session_state.update({"logged_in": False, "messages": []}); st.rerun()
         
         df = get_user_transactions(username)
-        
         with st.sidebar:
             st.subheader("📊 Analytics")
-            if not df.empty:
-                st.bar_chart(df.groupby('category')['amount'].sum())
-            if st.button("🗑️ Clear My Data"): clear_user_data(username); st.rerun()
-
-        st.title("💰 FinSight AI Assistant")
-        if "messages" not in st.session_state: st.session_state.messages = []
+            if not df.empty: st.bar_chart(df.groupby('category')['amount'].sum())
         
+        st.title("💰 FinSight AI Assistant")
         # 顯示歷史訊息
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-        # 處理使用者輸入
-        if user_text := st.chat_input("Log expense or ask..."):
+        # 處理訊息輸入
+        if user_text := st.chat_input("Log expense or ask question..."):
             st.chat_message("user").markdown(user_text)
             st.session_state.messages.append({"role": "user", "content": user_text})
             
-            with st.spinner("AI is thinking..."):
+            with st.spinner("Processing..."):
                 res = process_user_input(user_text, df)
-                
                 if res and res.get("intent") == "log":
                     insert_transaction(res['amount'], res['category'], res['description'], username)
-                    reply = f"✅ Logged: ${res['amount']} for {res['category']}"
+                    reply = f"✅ Logged ${res['amount']} for {res['category']}"
                     st.chat_message("assistant").markdown(reply)
                     st.session_state.messages.append({"role": "assistant", "content": reply})
-                    st.rerun() # 自動重新整理，圖表會動
+                    st.rerun()
                 elif res and res.get("intent") == "chat":
                     reply = res.get("chat_reply")
                     st.chat_message("assistant").markdown(reply)
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                 else:
-                    st.error("AI couldn't process this. Check logs.")
+                    st.error("AI couldn't process this.")
 
 if __name__ == "__main__":
     main()
