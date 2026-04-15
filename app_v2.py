@@ -11,7 +11,7 @@ from google import genai
 # 1. CONFIG & SECURITY
 # ==========================================
 # 請將 API Key 填入下方
-MY_API_KEY = "AIzaSyBOWAqxkAKxBBNkUy2-Fck_PkTqZlL6gIQ"
+MY_API_KEY = "AIzaSyB3-kbbqZfyvtP3ioHmbMAOwBcIC33oA0E"
 DB_NAME = "finance.db"
 
 def make_hashes(password):
