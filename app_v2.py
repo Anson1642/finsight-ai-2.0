@@ -5,23 +5,21 @@ import pandas as pd
 import hashlib
 import re
 import time
-import os
-
-# --- 官方最新套件 ---
-from langchain_huggingface import HuggingFaceEndpoint
-from langchain_core.messages import HumanMessage
-from langchain_core.output_parsers import JsonOutputParser
+from google import genai
 
 # ==========================================
 # 1. CONFIGURATION & SECURITY
 # ==========================================
-HF_API_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN")
+# 優先讀取雲端 Secrets，否則使用硬編碼 Key
+if "GOOGLE_API_KEY" in st.secrets:
+    MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
+else:
+    MY_API_KEY = "AIzaSyB3-kbbqZfyvtP3ioHmbMAOwBcIC33oA0E" # 這是你的 Key
 
-# 更換為 Zephyr 模型：這是目前與 LangChain 兼容性最高、最穩定的開源模型
-OPEN_SOURCE_LLM_MODEL = "HuggingFaceH4/zephyr-7b-beta" 
 DB_NAME = "finance.db"
 
-def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
+def make_hashes(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
 
 # ==========================================
 # 2. DATABASE FUNCTIONS
@@ -51,8 +49,7 @@ def login_user(username, password):
     c.execute("SELECT password FROM users WHERE username = ?", (username,))
     data = c.fetchone()
     conn.close()
-    if data and make_hashes(password) == data[0]: return True
-    return False
+    return data and make_hashes(password) == data[0]
 
 def insert_transaction(amount, category, description, username):
     conn = sqlite3.connect(DB_NAME)
@@ -62,54 +59,30 @@ def insert_transaction(amount, category, description, username):
 
 def get_user_transactions(username):
     conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT id, amount, category, description FROM transactions WHERE username = ?", conn, params=(username,))
+    df = pd.read_sql_query("SELECT amount, category, description FROM transactions WHERE username = ?", conn, params=(username,))
     conn.close()
     return df
 
 # ==========================================
-# 3. AI LOGIC ENGINE (The Most Stable Version)
+# 3. AI ENGINE (Gemini 2.0 Flash - The Most Stable)
 # ==========================================
-@st.cache_resource
-def get_llm_model_hf():
-    if not HF_API_TOKEN:
-        st.error("Secrets missing: HUGGINGFACEHUB_API_TOKEN")
-        return None
-    try:
-        # 強制指定 task="text-generation" 避開伺服器分類錯誤
-        return HuggingFaceEndpoint(
-            repo_id=OPEN_SOURCE_LLM_MODEL,
-            huggingfacehub_api_token=HF_API_TOKEN,
-            task="text-generation", 
-            temperature=0.1,
-            max_new_tokens=250,
-        )
-    except Exception as e:
-        st.error(f"Endpoint connection failed: {e}")
-        return None
-
-def process_user_input_with_hf(user_text, df):
-    llm = get_llm_model_hf()
-    if llm is None: return None
-
-    history = df.tail(5).to_string(index=False) if not df.empty else "No records."
+def process_user_input(user_text, df):
+    client = genai.Client(api_key=MY_API_KEY)
+    history = df.tail(10).to_string(index=False) if not df.empty else "No records."
     
-    # 針對 Zephyr 模型的最佳 Prompt 格式
-    prompt = f"""<|system|>
-You are a Finance Assistant. Only output JSON.
-History: {history}
-<|user|>
-Analyze: "{user_text}". 
-Return JSON:
-- If logging: {{"intent": "log", "amount": 10.0, "category": "Food", "description": "text"}}
-- If asking: {{"intent": "chat", "chat_reply": "answer"}}
-<|assistant|>
-"""
+    prompt = f"""You are a professional Finance Assistant. 
+    Analyze history: {history}
+    User input: "{user_text}"
+    Return JSON only:
+    - Log: {{"intent": "log", "amount": 0.0, "category": "Food/Transport/Housing/Entertainment/Others", "description": "text"}}
+    - Chat: {{"intent": "chat", "chat_reply": "your advice"}}
+    """
     try:
-        response = llm.invoke(prompt)
-        match = re.search(r'\{.*\}', response, re.DOTALL)
+        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        match = re.search(r'\{.*\}', response.text, re.DOTALL)
         return json.loads(match.group(0)) if match else None
     except Exception as e:
-        st.error(f"AI error: {e}")
+        if "429" in str(e): return {"intent": "chat", "chat_reply": "⚠️ API is busy. Please wait 10 seconds."}
         return None
 
 # ==========================================
@@ -123,49 +96,50 @@ def main():
         st.session_state.update({"logged_in": False, "username": None, "messages": []})
     
     if not st.session_state.logged_in:
-        st.title("💰 FinSight Pro")
+        st.title("💰 FinSight Pro - Login")
         choice = st.selectbox("Action", ["Login", "Signup"])
-        user = st.text_input("Username")
-        pwd = st.text_input("Password", type='password')
+        u = st.text_input("Username")
+        p = st.text_input("Password", type='password')
         if st.button("Enter"):
-            if choice == "Signup" and add_user(user, pwd): st.success("Created!")
-            elif choice == "Login" and login_user(user, pwd):
-                st.session_state.update({"logged_in": True, "username": user})
+            if choice == "Signup" and add_user(u, p): st.success("Created!")
+            elif choice == "Login" and login_user(u, p):
+                st.session_state.update({"logged_in": True, "username": u})
                 st.rerun()
-            else: st.error("Failed.")
+            else: st.error("Error.")
     else:
         username = st.session_state.username
         with st.sidebar:
             st.title(f"Hi, {username}!")
             df = get_user_transactions(username)
             if not df.empty:
+                st.subheader("📊 Analytics")
                 st.bar_chart(df.groupby('category')['amount'].sum())
-                st.download_button("CSV", df.to_csv(index=False).encode('utf-8'), "data.csv")
+                st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "data.csv")
             if st.button("Logout"):
-                st.session_state.update({"logged_in": False, "messages": []}); st.rerun()
+                st.session_state.update({"logged_in": False, "username": None, "messages": []}); st.rerun()
 
         st.title("💰 AI Finance Assistant")
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-        if user_text := st.chat_input("Log something..."):
+        if user_text := st.chat_input("Spent $50 on lunch..."):
             st.chat_message("user").markdown(user_text)
             st.session_state.messages.append({"role": "user", "content": user_text})
             
-            with st.spinner("Processing..."):
-                res = process_user_input_with_hf(user_text, df)
+            with st.spinner("AI is thinking..."):
+                res = process_user_input(user_text, df)
                 if res:
                     if res.get("intent") == "log" and res.get("amount") is not None:
                         insert_transaction(res['amount'], res['category'], res['description'], username)
-                        msg = f"✅ Logged: ${res['amount']} for {res['category']}"
-                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                        reply = f"✅ Logged: ${res['amount']} for {res['category']}"
+                        st.session_state.messages.append({"role": "assistant", "content": reply})
                         st.rerun()
                     elif res.get("intent") == "chat":
-                        reply = res.get("chat_reply", "I processed it.")
+                        reply = res.get("chat_reply", "Processed.")
                         st.chat_message("assistant").markdown(reply)
                         st.session_state.messages.append({"role": "assistant", "content": reply})
                 else:
-                    st.error("AI returned empty or error.")
+                    st.error("AI service error.")
 
 if __name__ == "__main__":
     main()
