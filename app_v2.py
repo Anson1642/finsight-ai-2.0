@@ -14,7 +14,7 @@ from google import genai
 if "GOOGLE_API_KEY" in st.secrets:
     MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
 else:
-    MY_API_KEY = "AIzaSyB3-kbbqZfyvtP3ioHmbMAOwBcIC33oA0E" # 請務必填入你自己的 Key
+    MY_API_KEY = "AIzaSyA7sb3tD6xuAzKvwYvjnK6TQ2lvOe9pE6w" # 請務必填入你自己的 Key
 
 DB_NAME = "finance.db"
 
