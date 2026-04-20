@@ -5,19 +5,20 @@ import pandas as pd
 import hashlib
 import re
 import time
-from google import genai
+
+# --- LangChain 相關套件 ---
+from langchain_google_genai import ChatGoogleGenerativeAI # 用 LangChain 呼叫 Gemini
+from langchain_core.messages import HumanMessage, SystemMessage # 訊息格式
+from langchain_core.output_parsers import JsonOutputParser # 解析 JSON 輸出
 
 # ==========================================
 # 1. CONFIGURATION & SECURITY
 # ==========================================
-# 優先讀取 Streamlit Cloud 的 Secrets，若無則使用代碼中的 Key
-# 修改這一行，讓程式碼更安全
+# 優先從 Streamlit Cloud secrets 讀取，若無則使用代碼中的硬編碼 Key (用於本地測試)
 if "GOOGLE_API_KEY" in st.secrets:
     MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
 else:
-    # 這裡放你的「最新、最安全的 Key」，僅限本地測試用
-    MY_API_KEY = "AIzaSyA7sb3tD6xuAzKvwYvjnK6TQ2lvOe9pE6w"
-
+    MY_API_KEY = "AIzaSyA7sb3tD6xuAzKvwYvjnK6TQ2lvOe9pE6w" # !!! 請務必填入你自己的 Key !!!
 
 DB_NAME = "finance.db"
 
@@ -35,7 +36,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, description TEXT, username TEXT)''')
     
-    # Check and add 'username' column if it doesn't exist (for migration)
+    # 檢查並自動補上 'username' 欄位 (資料庫遷移邏輯)
     c.execute("PRAGMA table_info(transactions)")
     columns = [info[1] for info in c.fetchall()]
     if 'username' not in columns:
@@ -52,7 +53,7 @@ def add_user(username, password):
         c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, make_hashes(password)))
         conn.commit()
         return True
-    except sqlite3.IntegrityError: # Username already exists
+    except sqlite3.IntegrityError: # 捕獲 'username' 已經存在的錯誤
         return False
     finally:
         conn.close()
@@ -93,82 +94,64 @@ def clear_user_data(username):
     conn.close()
 
 # ==========================================
-# 3. AI LOGIC ENGINE
+# 3. AI LOGIC ENGINE (Now with LangChain!)
 # ==========================================
-def process_user_input(user_text, df):
-    """
-    Sends user text and transaction history to AI to determine intent (log/chat) 
-    and extract data or generate a reply.
-    """
-    # 強制等待 2 秒，避免觸發 Google API 頻率限制 (429 Error)
-    time.sleep(2) 
-    
-    # 檢查 API Key 是否有效
+@st.cache_resource # 將 LangChain 模型快取，避免每次 rerun 都重新載入
+def get_llm_model():
+    """Initializes and returns the LangChain-wrapped Gemini model."""
     if not MY_API_KEY or MY_API_KEY == "PASTE_YOUR_API_KEY_HERE":
-        return {"intent": "chat", "chat_reply": "Error: API Key is not set correctly! Please configure it in code or Streamlit Secrets."}
+        st.error("Error: API Key is not configured. Please check app settings.")
+        return None
+    return ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=MY_API_KEY, temperature=0.1)
 
-    client = genai.Client(api_key=MY_API_KEY)
-    
+def process_user_input_with_langchain(user_text, df):
+    """
+    Uses LangChain to process user text, determine intent, and extract data/generate replies.
+    """
+    llm = get_llm_model()
+    if llm is None: return None
+
     # 提供 AI 歷史交易紀錄作為上下文
     history_text = df.tail(15).to_string(index=False) if not df.empty else "No previous transactions."
     
-    # AI 的 Prompt (提示詞)，定義其角色和期望的輸出格式
-    prompt = f"""You are FinSight AI, a professional AI Finance Assistant.
-    Your task is to either log new expenses based on user input or provide helpful financial advice/answers by analyzing the user's transaction history.
-    
-    --- Transaction History for Context ---
-    {history_text}
-    --- End of History ---
-    
-    User Input: "{user_text}"
-    
-    Return STRICTLY a valid JSON object. Do NOT include markdown code blocks (e.g., ```json) or any conversational text outside the JSON.
-    
-    If the user is logging a new expense, use this JSON format:
-    {{
-        "intent": "log",
-        "amount": <number_only_e.g._100.50>,
-        "category": "<One_word_e.g._Food/Transport/Housing/Entertainment/Others>",
-        "description": "<short_text_e.g._Lunch_at_cafe>"
-    }}
-    
-    If the user is asking a question or for advice, use this JSON format:
-    {{
-        "intent": "chat",
-        "chat_reply": "<Your_helpful_and_concise_answer_based_on_history_or_general_financial_knowledge>"
-    }}
-    """
+    # 定義 JSON 解析器
+    parser = JsonOutputParser()
+
+    # AI 的 Prompt (提示詞) - 更明確地定義輸入和輸出
+    messages = [
+        SystemMessage(content="You are FinSight AI, a professional AI Finance Assistant. "
+                              "Your task is to either log new expenses based on user input or provide helpful financial advice/answers by analyzing the user's transaction history. "
+                              "Strictly return a JSON object. Do not include markdown code blocks or any conversational text outside the JSON. "
+                              "Standard Categories: Food, Transport, Housing, Entertainment, Others. "
+                              f"Transaction History: {history_text}"),
+        HumanMessage(content=f"User Input: {user_text}\n"
+                             f"Return JSON for logging: {{\"intent\": \"log\", \"amount\": 0.0, \"category\": \"Food\", \"description\": \"lunch\"}}\n"
+                             f"Return JSON for chatting: {{\"intent\": \"chat\", \"chat_reply\": \"Your advice/answer here\"}}")
+    ]
     
     try:
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        # 使用正則表達式強行從 AI 回應中提取 JSON 字串
-        match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        if match:
-            clean_json_string = match.group(0)
-            return json.loads(clean_json_string)
-        else:
-            # 如果 AI 回覆不包含有效 JSON，則返回錯誤訊息
-            return {"intent": "chat", "chat_reply": f"AI Parsing Error: Could not find valid JSON in response. Raw AI output: {response.text}"}
+        # 使用 LangChain 的 invoke 方法呼叫 LLM
+        response = llm.invoke(messages)
+        return parser.parse(response.content) # 使用 parser 解析內容
     except Exception as e:
         # 捕獲 API 連線或執行錯誤，並提供用戶友好的訊息
         error_msg = str(e)
         if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "UNAVAILABLE" in error_msg:
             return {"intent": "chat", "chat_reply": "⚠️ API limit reached. Please wait a moment or try again later. Google AI servers might be busy."}
         else:
-            print(f"AI Processing Critical Error: {error_msg}") # 打印到終端機方便除錯
-            return {"intent": "chat", "chat_reply": f"An unexpected AI error occurred: {error_msg}. Please try again or check console logs."}
+            st.error(f"AI Processing Critical Error: {error_msg}") # 打印到 Streamlit 介面方便除錯
+            return None
 
 # ==========================================
-# 4. STREAMLIT UI (FULL FEATURED)
+# 4. STREAMLIT UI (Full-Featured Application)
 # ==========================================
 def main():
-    st.set_page_config(page_title="FinSight Pro", layout="wide")
+    st.set_page_config(page_title="FinSight Pro", layout="wide", initial_sidebar_state="expanded")
     init_db()
 
-    # Session State 初始化
+    # Session State 初始化和管理
     if "logged_in" not in st.session_state: st.session_state.update({"logged_in": False, "username": None, "messages": []})
-    if "last_input_processed" not in st.session_state: st.session_state.last_input_processed = ""
-
+    
     # --- 登入/註冊頁面 ---
     if not st.session_state.logged_in:
         st.title("💰 FinSight AI - Access")
@@ -181,7 +164,7 @@ def main():
                 else: st.error("Username already exists!")
             else: # Login logic
                 if login_user(user, pwd):
-                    st.session_state.update({"logged_in": True, "username": user, "messages": []})
+                    st.session_state.update({"logged_in": True, "username": user, "messages": []}) # 登入成功清空訊息
                     st.rerun() # 成功登入後重整頁面
                 else: st.error("Invalid Username or Password")
     
@@ -189,32 +172,35 @@ def main():
     else:
         username = st.session_state.username
         
-        # 側邊欄 (Sidebar)
+        # 側邊欄 (Sidebar) 內容
         with st.sidebar:
             st.title(f"Welcome, {username}!")
             if st.button("Logout"): st.session_state.update({"logged_in": False, "messages": []}); st.rerun()
             
-            df = get_user_transactions(username) # 獲取用戶數據
+            df = get_user_transactions(username) # 獲取當前用戶的數據
             
-            st.subheader("📊 Analytics")
+            st.subheader("📊 Spending Analytics")
             if not df.empty:
                 category_sums = df.groupby('category')['amount'].sum()
                 st.bar_chart(category_sums)
                 
                 # 下載 CSV 功能
+                st.divider()
+                st.subheader("📥 Export Data")
                 csv_data = df.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="Download as CSV",
                     data=csv_data,
-                    file_name='my_transactions.csv',
+                    file_name=f'{username}_transactions.csv',
                     mime='text/csv',
                     help="Download your transaction history as an Excel-compatible CSV file."
                 )
             else:
-                st.info("No data yet. Log some transactions!")
+                st.info("No data yet. Log some transactions in the chat to see your analytics!")
             
             st.divider()
-            if st.button("🗑️ Clear My Data"):
+            # 清空個人數據按鈕
+            if st.button("🗑️ Clear All My Data"):
                 clear_user_data(username)
                 st.session_state.messages = [] # 清空聊天紀錄
                 st.rerun() # 重整頁面
@@ -230,15 +216,13 @@ def main():
 
         # 處理使用者輸入
         if user_text := st.chat_input("Type your expense or question..."):
-            # 添加使用者訊息到會話狀態，並顯示在聊天框
             st.chat_message("user").markdown(user_text)
             st.session_state.messages.append({"role": "user", "content": user_text})
             
-            # 使用 spinner 顯示 AI 正在思考
             with st.spinner("AI is thinking..."):
-                res = process_user_input(user_text, df) # 呼叫 AI 處理輸入
+                # 使用 LangChain 處理輸入
+                res = process_user_input_with_langchain(user_text, df) 
                 
-                # 根據 AI 回應的 intent 進行處理
                 if res:
                     if res.get("intent") == "log" and res.get("amount") is not None:
                         # 記錄交易
@@ -256,10 +240,10 @@ def main():
                     
                     else:
                         # AI 判斷意圖失敗或格式不符
-                        st.error("AI couldn't understand your request. Please try again with clear instructions.")
+                        st.error("AI couldn't process your request. Please try again with clear instructions.")
                 else:
-                    # process_user_input 返回 None，表示發生了內部錯誤
-                    st.error("An internal processing error occurred. Please try again.")
+                    # process_user_input_with_langchain 返回 None，表示發生了內部錯誤
+                    st.error("An internal AI processing error occurred. Please try again.")
 
 if __name__ == "__main__":
     main()
