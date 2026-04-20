@@ -1,4 +1,6 @@
-streamlit
-pandas
-langchain-community
-langchain-core
+streamlit==1.32.2 # 鎖定 Streamlit 版本，避免 UI 錯誤
+pandas==2.2.2
+google-genai==0.6.0
+langchain-community==0.0.38 # 確保這些是正確的 LangChain 新版模組
+langchain-core==0.1.52
+langchain-google-genai==0.0.12
