@@ -11,8 +11,12 @@ from google import genai
 # 1. CONFIGURATION & SECURITY
 # ==========================================
 # 優先讀取 Streamlit Cloud 的 Secrets，若無則使用代碼中的 Key
-"GOOGLE_API_KEY" in st.secrets:
+# 修改這一行，讓程式碼更安全
+if "GOOGLE_API_KEY" in st.secrets:
     MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
+else:
+    # 這裡放你的「最新、最安全的 Key」，僅限本地測試用
+    MY_API_KEY = "AIzaSyA7sb3tD6xuAzKvwYvjnK6TQ2lvOe9pE6w"
 
 
 DB_NAME = "finance.db"
