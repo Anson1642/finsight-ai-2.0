@@ -2,4 +2,5 @@ streamlit
 pandas
 langchain-community
 langchain-core
-langchain-google-genai
+langchain-google-genai # 這個套件可以移除，因為我們不再用 Gemini 了
+huggingface_hub # <--- 確保這行存在！
