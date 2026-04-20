@@ -7,10 +7,11 @@ import re
 import time
 
 # --- LangChain 相關套件 ---
-from langchain_community.llms import HuggingFaceHub # 用 LangChain 呼叫 Hugging Face
+from langchain_community.llms import HuggingFaceHub # 如果需要HuggingFace
+from langchain_google_genai import ChatGoogleGenerativeAI # 如果需要Google Gemini
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain.prompts import PromptTemplate # 引入 PromptTemplate 讓 Prompt 更清晰
+from langchain.prompts import PromptTemplate # 這個 PromptTemplate 模組目前仍在 langchain 套件下
 
 # ==========================================
 # 1. CONFIGURATION & SECURITY
