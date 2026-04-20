@@ -8,11 +8,11 @@ import time
 import os # <--- 確保這行存在！
 
 # --- LangChain 相關套件 ---
-from langchain_community.llms import HuggingFaceHub # 用 LangChain 呼叫 Hugging Face
-# from langchain_google_genai import ChatGoogleGenerativeAI # 不再使用 Google Gemini，所以註解掉
+from langchain_community.llms import HuggingFaceHub # 如果你要用 HuggingFace
+# from langchain_google_genai import ChatGoogleGenerativeAI # 如果你要用 Google Gemini，請取消註解
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain.prompts import PromptTemplate # 這個 PromptTemplate 模組目前仍在 langchain 套件下
+from langchain.prompts import PromptTemplate # 修正為正確的匯入方式，現在它應該能被找到
 
 # ==========================================
 # 1. CONFIGURATION & SECURITY
