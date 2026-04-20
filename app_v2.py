@@ -7,19 +7,18 @@ import re
 import time
 import os
 
-# --- 最新 LangChain Hugging Face 套件 ---
+# --- 官方最新套件 ---
 from langchain_huggingface import HuggingFaceEndpoint
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
 
 # ==========================================
 # 1. CONFIGURATION & SECURITY
 # ==========================================
 HF_API_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN")
 
-# 使用最穩定的開源模型
-OPEN_SOURCE_LLM_MODEL = "mistralai/Mistral-7B-Instruct-v0.2" 
+# 更換為 Zephyr 模型：這是目前與 LangChain 兼容性最高、最穩定的開源模型
+OPEN_SOURCE_LLM_MODEL = "HuggingFaceH4/zephyr-7b-beta" 
 DB_NAME = "finance.db"
 
 def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
@@ -67,56 +66,50 @@ def get_user_transactions(username):
     conn.close()
     return df
 
-def clear_user_data(username):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM transactions WHERE username = ?", (username,))
-    conn.commit(); conn.close()
-
 # ==========================================
-# 3. AI LOGIC ENGINE (Fixed Version)
+# 3. AI LOGIC ENGINE (The Most Stable Version)
 # ==========================================
 @st.cache_resource
 def get_llm_model_hf():
     if not HF_API_TOKEN:
-        st.error("Secrets Error: HUGGINGFACEHUB_API_TOKEN missing.")
+        st.error("Secrets missing: HUGGINGFACEHUB_API_TOKEN")
         return None
-    
     try:
-        # 使用最新版的官方 Endpoint 類
-        llm = HuggingFaceEndpoint(
+        # 強制指定 task="text-generation" 避開伺服器分類錯誤
+        return HuggingFaceEndpoint(
             repo_id=OPEN_SOURCE_LLM_MODEL,
             huggingfacehub_api_token=HF_API_TOKEN,
+            task="text-generation", 
             temperature=0.1,
             max_new_tokens=250,
         )
-        return llm
     except Exception as e:
-        st.error(f"Endpoint Error: {e}")
+        st.error(f"Endpoint connection failed: {e}")
         return None
 
 def process_user_input_with_hf(user_text, df):
     llm = get_llm_model_hf()
     if llm is None: return None
 
-    history_text = df.tail(10).to_string(index=False) if not df.empty else "No history."
+    history = df.tail(5).to_string(index=False) if not df.empty else "No records."
     
-    # 格式化 Prompt，強迫模型輸出 JSON
-    prompt = f"""<s>[INST] You are FinSight AI. Based on the history, analyze user input.
-    History: {history_text}
-    User: "{user_text}"
-    
-    Task: Return JSON ONLY.
-    - For logging: {{"intent": "log", "amount": 10.0, "category": "Food", "description": "text"}}
-    - For chat: {{"intent": "chat", "chat_reply": "your answer"}}
-    [/INST]"""
-    
+    # 針對 Zephyr 模型的最佳 Prompt 格式
+    prompt = f"""<|system|>
+You are a Finance Assistant. Only output JSON.
+History: {history}
+<|user|>
+Analyze: "{user_text}". 
+Return JSON:
+- If logging: {{"intent": "log", "amount": 10.0, "category": "Food", "description": "text"}}
+- If asking: {{"intent": "chat", "chat_reply": "answer"}}
+<|assistant|>
+"""
     try:
-        response_content = llm.invoke(prompt)
-        match = re.search(r'\{.*\}', response_content, re.DOTALL)
+        response = llm.invoke(prompt)
+        match = re.search(r'\{.*\}', response, re.DOTALL)
         return json.loads(match.group(0)) if match else None
     except Exception as e:
-        st.error(f"AI Parse Error: {e}")
+        st.error(f"AI error: {e}")
         return None
 
 # ==========================================
@@ -130,55 +123,49 @@ def main():
         st.session_state.update({"logged_in": False, "username": None, "messages": []})
     
     if not st.session_state.logged_in:
-        st.title("💰 FinSight AI - Login")
+        st.title("💰 FinSight Pro")
         choice = st.selectbox("Action", ["Login", "Signup"])
         user = st.text_input("Username")
         pwd = st.text_input("Password", type='password')
         if st.button("Enter"):
-            if choice == "Signup" and add_user(user, pwd): st.success("Account created!")
+            if choice == "Signup" and add_user(user, pwd): st.success("Created!")
             elif choice == "Login" and login_user(user, pwd):
                 st.session_state.update({"logged_in": True, "username": user})
                 st.rerun()
-            else: st.error("Invalid credentials.")
+            else: st.error("Failed.")
     else:
         username = st.session_state.username
-        
         with st.sidebar:
             st.title(f"Hi, {username}!")
             df = get_user_transactions(username)
             if not df.empty:
-                st.subheader("📊 Analytics")
                 st.bar_chart(df.groupby('category')['amount'].sum())
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("Download CSV", csv, "data.csv")
-            st.divider()
-            if st.button("🗑️ Clear My Data"):
-                clear_user_data(username); st.session_state.messages = []; st.rerun()
+                st.download_button("CSV", df.to_csv(index=False).encode('utf-8'), "data.csv")
             if st.button("Logout"):
                 st.session_state.update({"logged_in": False, "messages": []}); st.rerun()
 
-        st.title("💰 FinSight AI Assistant")
+        st.title("💰 AI Finance Assistant")
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-        if user_text := st.chat_input("Spent $50 on lunch..."):
+        if user_text := st.chat_input("Log something..."):
             st.chat_message("user").markdown(user_text)
             st.session_state.messages.append({"role": "user", "content": user_text})
             
-            with st.spinner("AI is thinking..."):
+            with st.spinner("Processing..."):
                 res = process_user_input_with_hf(user_text, df)
                 if res:
                     if res.get("intent") == "log" and res.get("amount") is not None:
                         insert_transaction(res['amount'], res['category'], res['description'], username)
-                        reply = f"✅ **Logged:** ${res['amount']} for {res['category']}"
-                        st.session_state.messages.append({"role": "assistant", "content": reply})
+                        msg = f"✅ Logged: ${res['amount']} for {res['category']}"
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
                         st.rerun()
                     elif res.get("intent") == "chat":
-                        reply = res.get("chat_reply", "I processed your request.")
+                        reply = res.get("chat_reply", "I processed it.")
                         st.chat_message("assistant").markdown(reply)
                         st.session_state.messages.append({"role": "assistant", "content": reply})
                 else:
-                    st.error("AI service error. Please try again.")
+                    st.error("AI returned empty or error.")
 
 if __name__ == "__main__":
     main()
