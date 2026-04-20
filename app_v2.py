@@ -11,7 +11,7 @@ from google import genai
 # 1. CONFIGURATION & SECURITY
 # ==========================================
 # 優先讀取 Streamlit Cloud 的 Secrets，若無則使用代碼中的 Key
-if "GOOGLE_API_KEY" in st.secrets:
+"GOOGLE_API_KEY" in st.secrets:
     MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
 
 
