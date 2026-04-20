@@ -5,34 +5,32 @@ import pandas as pd
 import hashlib
 import re
 import time
+import os # <--- 確保這行存在！
 
 # --- LangChain 相關套件 ---
-# --- LangChain 相關套件 ---
-from langchain_community.llms import HuggingFaceHub 
-from langchain_google_genai import ChatGoogleGenerativeAI 
+from langchain_community.llms import HuggingFaceHub # 用 LangChain 呼叫 Hugging Face
+# from langchain_google_genai import ChatGoogleGenerativeAI # 不再使用 Google Gemini，所以註解掉
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate # <--- 修正了這裡！從 langchain.prompts 改為 langchain_core.prompts
+from langchain.prompts import PromptTemplate # 這個 PromptTemplate 模組目前仍在 langchain 套件下
 
 # ==========================================
 # 1. CONFIGURATION & SECURITY
 # ==========================================
-# IMPORTANT: HF_API_TOKEN 將完全從 Streamlit Secrets 中讀取。
+# 從 Streamlit secrets 讀取 Hugging Face Token
+# HF_API_TOKEN 將從 Streamlit Secrets 中讀取。
 # 如果未設定，它將是 None。程式碼會處理這個錯誤。
-HF_API_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN") # 從 st.secrets 讀取
+HF_API_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN")
 
-OPEN_SOURCE_LLM_MODEL = "meta-llama/Llama-2-7b-chat-hf" 
+OPEN_SOURCE_LLM_MODEL = "meta-llama/Llama-2-7b-chat-hf" # 你可以換成其他模型，例如 "mistralai/Mistral-7B-Instruct-v0.2"
 DB_NAME = "finance.db"
 
-def make_hashes(password):
-    """Generates a SHA256 hash for the given password."""
-    return hashlib.sha256(str.encode(password)).hexdigest()
+def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
 
 # ==========================================
 # 2. DATABASE FUNCTIONS
 # ==========================================
 def init_db():
-    """Initializes the SQLite database with users and transactions tables."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
@@ -48,52 +46,40 @@ def init_db():
     conn.close()
 
 def add_user(username, password):
-    """Adds a new user to the database."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     try:
         c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, make_hashes(password)))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError: # 捕獲 'username' 已經存在的錯誤
-        return False
-    finally:
-        conn.close()
+        conn.commit(); return True
+    except sqlite3.IntegrityError: return False
+    finally: conn.close()
 
 def login_user(username, password):
-    """Verifies user credentials for login."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT password FROM users WHERE username = ?", (username,))
     data = c.fetchone()
     conn.close()
-    if data and make_hashes(password) == data[0]:
-        return True
+    if data and make_hashes(password) == data[0]: return True
     return False
 
 def insert_transaction(amount, category, description, username):
-    """Inserts a new transaction for a specific user."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT INTO transactions (amount, category, description, username) VALUES (?, ?, ?, ?)", 
-              (amount, category, description, username))
-    conn.commit()
-    conn.close()
+    c.execute("INSERT INTO transactions (amount, category, description, username) VALUES (?, ?, ?, ?)", (amount, category, description, username))
+    conn.commit(); conn.close()
 
 def get_user_transactions(username):
-    """Fetches all transactions for a given user."""
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT id, amount, category, description FROM transactions WHERE username = ?", conn, params=(username,))
     conn.close()
     return df
 
 def clear_user_data(username):
-    """Deletes all transaction data for a specific user."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("DELETE FROM transactions WHERE username = ?", (username,))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
 # ==========================================
 # 3. AI LOGIC ENGINE (Now with LangChain & Hugging Face)
@@ -101,18 +87,23 @@ def clear_user_data(username):
 @st.cache_resource # 將 LangChain 模型快取，避免每次 rerun 都重新載入
 def get_llm_model_hf():
     """Initializes and returns the LangChain-wrapped Hugging Face model."""
-    # 這裡檢查 Token 是否已經從 Streamlit Secrets 中讀取到
     if not HF_API_TOKEN: # 如果 HF_API_TOKEN 是 None 或空字串
         st.error("Error: Hugging Face API Token is not configured in Streamlit Secrets. Please add HUGGINGFACEHUB_API_TOKEN to your app's secrets.")
         return None
     
-    # 使用 HuggingFaceHub 連接到開源模型
-    llm = HuggingFaceHub(
-        repo_id=OPEN_SOURCE_LLM_MODEL,
-        huggingfacehub_api_token=HF_API_TOKEN,
-        model_kwargs={"temperature": 0.1, "max_new_tokens": 150}
-    )
-    return llm
+    # --- 關鍵修正：設置環境變數，讓 HuggingFaceHub 能夠讀取到 Token ---
+    os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_API_TOKEN
+    
+    try:
+        llm = HuggingFaceHub(
+            repo_id=OPEN_SOURCE_LLM_MODEL,
+            # hf_api_token=HF_API_TOKEN, <--- 刪除這一行，因為它會自動從環境變數中讀取
+            model_kwargs={"temperature": 0.1, "max_new_tokens": 150}
+        )
+        return llm
+    except Exception as e:
+        st.error(f"Failed to initialize HuggingFaceHub: {e}. Check token or model ID.")
+        return None
 
 def process_user_input_with_hf(user_text, df):
     """
@@ -163,7 +154,6 @@ def process_user_input_with_hf(user_text, df):
     except Exception as e:
         st.error(f"AI Processing Critical Error: {e}") 
         return {"intent": "chat", "chat_reply": f"An internal AI error occurred: {e}. Please try again."}
-
 
 # ==========================================
 # 4. STREAMLIT UI (Full-Featured Application)
