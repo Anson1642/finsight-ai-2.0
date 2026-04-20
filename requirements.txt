@@ -1,5 +1,7 @@
 streamlit
 pandas
+langchain # <--- 新增這行！確保安裝 LangChain 根套件
 langchain-community
 langchain-core
-huggingface_hub # <--- 確保這行存在！
+langchain-google-genai
+huggingface_hub # <--- 確保這行存在，因為 HuggingFaceHub 需要它
