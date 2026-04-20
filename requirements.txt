@@ -1,5 +1,5 @@
-streamlit==1.32.2
-pandas==2.2.2
-langchain-community==0.0.38
-langchain-core==0.1.52
-langchain-google-genai==0.0.12
+streamlit
+pandas
+langchain-community
+langchain-core
+langchain-google-genai
