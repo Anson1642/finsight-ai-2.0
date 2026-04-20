@@ -8,13 +8,12 @@ import time
 from google import genai
 
 # ==========================================
-# 1. CONFIGURATION & SECURITY
+# 1. CONFIGURATION & SECURITY (Only st.secrets)
 # ==========================================
-# 優先讀取雲端 Secrets，否則使用硬編碼 Key
-if "GOOGLE_API_KEY" in st.secrets:
-    MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
-else:
-    MY_API_KEY = "AIzaSyB3-kbbqZfyvtP3ioHmbMAOwBcIC33oA0E" # 這是你的 Key
+# 嚴格只從 Streamlit Cloud 的 Secrets 讀取
+# 介面位置：Manage App -> Settings -> Secrets
+# 格式：GOOGLE_API_KEY = "你的KEY"
+MY_API_KEY = st.secrets.get("GOOGLE_API_KEY")
 
 DB_NAME = "finance.db"
 
@@ -29,10 +28,15 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, description TEXT, username TEXT)''')
+    
+    # 自動偵測並修正資料庫欄位 (Migration)
     c.execute("PRAGMA table_info(transactions)")
-    if 'username' not in [info[1] for info in c.fetchall()]:
+    columns = [info[1] for info in c.fetchall()]
+    if 'username' not in columns:
         c.execute("ALTER TABLE transactions ADD COLUMN username TEXT")
-    conn.commit(); conn.close()
+    
+    conn.commit()
+    conn.close()
 
 def add_user(username, password):
     conn = sqlite3.connect(DB_NAME)
@@ -64,60 +68,78 @@ def get_user_transactions(username):
     return df
 
 # ==========================================
-# 3. AI ENGINE (Gemini 2.0 Flash - The Most Stable)
+# 3. AI LOGIC ENGINE (Gemini 2.0 Flash)
 # ==========================================
 def process_user_input(user_text, df):
+    if not MY_API_KEY:
+        return {"intent": "chat", "chat_reply": "❌ Error: GOOGLE_API_KEY not found in Secrets."}
+
     client = genai.Client(api_key=MY_API_KEY)
-    history = df.tail(10).to_string(index=False) if not df.empty else "No records."
+    history = df.tail(10).to_string(index=False) if not df.empty else "No history."
     
-    prompt = f"""You are a professional Finance Assistant. 
-    Analyze history: {history}
+    prompt = f"""You are 'FinSight AI', a professional finance assistant.
+    Transaction History: {history}
     User input: "{user_text}"
-    Return JSON only:
-    - Log: {{"intent": "log", "amount": 0.0, "category": "Food/Transport/Housing/Entertainment/Others", "description": "text"}}
-    - Chat: {{"intent": "chat", "chat_reply": "your advice"}}
+    
+    Task: Analyze the input and return ONLY JSON.
+    - If logging an expense: {{"intent": "log", "amount": 10.0, "category": "Food/Transport/Housing/Entertainment/Others", "description": "pizza"}}
+    - If asking/chatting: {{"intent": "chat", "chat_reply": "your advice or answer based on data"}}
+    No markdown blocks, no extra text.
     """
     try:
+        # 強制加入少許延遲，防止 429 錯誤
+        time.sleep(1)
         response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        # 用正則表達式提取 JSON，防止 AI 多廢話
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
         return json.loads(match.group(0)) if match else None
     except Exception as e:
-        if "429" in str(e): return {"intent": "chat", "chat_reply": "⚠️ API is busy. Please wait 10 seconds."}
+        if "429" in str(e):
+            return {"intent": "chat", "chat_reply": "⚠️ API limit reached. Please wait 10 seconds and try again."}
         return None
 
 # ==========================================
-# 4. MAIN UI
+# 4. MAIN UI (STREAMLIT)
 # ==========================================
 def main():
     st.set_page_config(page_title="FinSight Pro", layout="wide")
     init_db()
 
+    # Session 管理
     if "logged_in" not in st.session_state: 
         st.session_state.update({"logged_in": False, "username": None, "messages": []})
-    
+
     if not st.session_state.logged_in:
         st.title("💰 FinSight Pro - Login")
         choice = st.selectbox("Action", ["Login", "Signup"])
         u = st.text_input("Username")
         p = st.text_input("Password", type='password')
         if st.button("Enter"):
-            if choice == "Signup" and add_user(u, p): st.success("Created!")
+            if choice == "Signup" and add_user(u, p): st.success("Success! Please Login.")
             elif choice == "Login" and login_user(u, p):
                 st.session_state.update({"logged_in": True, "username": u})
                 st.rerun()
-            else: st.error("Error.")
+            else: st.error("Access denied.")
     else:
         username = st.session_state.username
+        
+        # --- SIDEBAR ---
         with st.sidebar:
-            st.title(f"Hi, {username}!")
+            st.title(f"Welcome, {username}!")
             df = get_user_transactions(username)
             if not df.empty:
                 st.subheader("📊 Analytics")
                 st.bar_chart(df.groupby('category')['amount'].sum())
-                st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "data.csv")
+                # 下載 CSV 功能
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download CSV", csv, f"{username}_data.csv", "text/csv")
+            
+            st.divider()
             if st.button("Logout"):
-                st.session_state.update({"logged_in": False, "username": None, "messages": []}); st.rerun()
+                st.session_state.update({"logged_in": False, "username": None, "messages": []})
+                st.rerun()
 
+        # --- MAIN CHAT ---
         st.title("💰 AI Finance Assistant")
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
@@ -126,20 +148,5 @@ def main():
             st.chat_message("user").markdown(user_text)
             st.session_state.messages.append({"role": "user", "content": user_text})
             
-            with st.spinner("AI is thinking..."):
-                res = process_user_input(user_text, df)
-                if res:
-                    if res.get("intent") == "log" and res.get("amount") is not None:
-                        insert_transaction(res['amount'], res['category'], res['description'], username)
-                        reply = f"✅ Logged: ${res['amount']} for {res['category']}"
-                        st.session_state.messages.append({"role": "assistant", "content": reply})
-                        st.rerun()
-                    elif res.get("intent") == "chat":
-                        reply = res.get("chat_reply", "Processed.")
-                        st.chat_message("assistant").markdown(reply)
-                        st.session_state.messages.append({"role": "assistant", "content": reply})
-                else:
-                    st.error("AI service error.")
-
-if __name__ == "__main__":
-    main()
+            with st.spinner("Analyzing..."):
+                res = pro
