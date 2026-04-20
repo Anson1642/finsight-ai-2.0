@@ -1,7 +1,6 @@
 streamlit
 pandas
-langchain # <--- 確保這行存在，因為其他 LangChain 模組可能需要它作為根依賴
+langchain
 langchain-community
 langchain-core
-langchain-google-genai # 根據你的需求，如果你只用Hugging Face，這行可移除
-huggingface_hub # <--- 確保這行存在，因為 HuggingFaceHub 需要它
+huggingface_hub
