@@ -94,6 +94,15 @@ def clear_user_data(username):
     conn.commit()
     conn.close()
 
+    def process_user_input(user_text, df):
+    # --- 本地過濾邏輯 ---
+    greetings = ["hi", "hello", "你好", "hey", "早安", "午安", "晚安"]
+    if user_text.lower().strip() in greetings:
+        return {"intent": "chat", "chat_reply": "Hello! I am your AI assistant. How can I help you with your finances today?"}
+    
+    # 如果不是打招呼，才進入後面的 API 呼叫程序...
+    client = genai.Client(api_key=MY_API_KEY)
+
 # ==========================================
 # 3. AI LOGIC ENGINE (Robust Intent Routing and Parsing)
 # ==========================================
