@@ -9,246 +9,204 @@ import plotly.express as px
 from google import genai
 
 # ==========================================
-# 1. CONFIGURATION & CUSTOM CSS (FULL VERSION)
+# 1. CONFIGURATION & CUSTOM CSS
 # ==========================================
-# 優先讀取 Streamlit Cloud 的 Secrets，若無則使用代碼中的硬編碼 Key
-if "GOOGLE_API_KEY" in st.secrets:
-    MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
-else:
-    MY_API_KEY = "AIzaSyBwzvW898kUFdaLfy7cZxNoTZ4ESfu6qnw" # 你的 Key
-
+# 嚴格只從 Streamlit Cloud 的 Secrets 讀取
+MY_API_KEY = st.secrets.get("GOOGLE_API_KEY")
 DB_NAME = "finance.db"
 
 def apply_custom_style():
-    """加載自定義 CSS，美化按鈕、背景與字體"""
+    """加載極致美化 CSS"""
     st.markdown("""
         <style>
         .main { background-color: #f8f9fa; }
-        div.stButton > button:first-child {
-            border-radius: 10px;
-            height: 3em;
-            width: 100%;
-            border: 1px solid #007bff;
-            background-color: white;
-            color: #007bff;
-            font-weight: bold;
-            transition: 0.3s;
+        /* 美化側邊欄按鈕 */
+        .stButton > button {
+            border-radius: 8px;
+            transition: all 0.3s ease;
         }
-        div.stButton > button:hover {
-            background-color: #007bff;
-            color: white;
-        }
-        [data-testid="stMetricValue"] { font-size: 1.8rem; color: #1f1f1f; }
-        [data-testid="stMetricLabel"] { font-size: 1rem; color: #666; }
-        .stChatMessage {
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-            border-radius: 15px;
-            margin-bottom: 10px;
-        }
+        /* 數據卡片樣式 */
+        [data-testid="stMetricValue"] { font-size: 2rem; color: #007bff; font-weight: 700; }
+        [data-testid="stMetricLabel"] { font-size: 1.1rem; font-weight: 500; }
+        /* 聊天視窗優化 */
+        .stChatMessage { border-radius: 12px; border: 1px solid #e9ecef; margin-bottom: 10px; }
         </style>
     """, unsafe_allow_html=True)
 
 def make_hashes(password):
-    """密碼雜湊處理 (SHA-256)"""
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 # ==========================================
 # 2. DATABASE FUNCTIONS (User-Scoped & Migration)
 # ==========================================
 def init_db():
-    """初始化資料庫並執行自動遷移"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    conn = sqlite3.connect(DB_NAME); c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, description TEXT, username TEXT)')
-    
-    # 自動補上 username 欄位 (防止舊版資料庫報錯)
+    # 自動資料庫遷移邏輯
     c.execute("PRAGMA table_info(transactions)")
     columns = [info[1] for info in c.fetchall()]
     if 'username' not in columns:
         c.execute("ALTER TABLE transactions ADD COLUMN username TEXT")
-    
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
-def add_user(username, password):
+def add_user(u, p):
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
     try:
-        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, make_hashes(password)))
+        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (u, make_hashes(p)))
         conn.commit(); return True
     except: return False
     finally: conn.close()
 
-def login_user(username, password):
+def login_user(u, p):
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
-    c.execute("SELECT password FROM users WHERE username = ?", (username,))
+    c.execute("SELECT password FROM users WHERE username = ?", (u,))
     data = c.fetchone()
     conn.close()
-    return data and make_hashes(password) == data[0]
+    return data and make_hashes(p) == data[0]
 
-def insert_transaction(amount, category, description, username):
+def insert_transaction(amt, cat, desc, user):
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
-    c.execute("INSERT INTO transactions (amount, category, description, username) VALUES (?, ?, ?, ?)", (amount, category, description, username))
+    c.execute("INSERT INTO transactions (amount, category, description, username) VALUES (?, ?, ?, ?)", (amt, cat, desc, user))
     conn.commit(); conn.close()
 
-def get_user_transactions(username):
+def get_user_transactions(user):
     conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT amount, category, description FROM transactions WHERE username = ?", conn, params=(username,))
+    df = pd.read_sql_query("SELECT amount, category, description FROM transactions WHERE username = ?", conn, params=(user,))
     conn.close()
     return df
 
-def clear_user_data(username):
+def clear_user_data(user):
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
-    c.execute("DELETE FROM transactions WHERE username = ?", (username,))
+    c.execute("DELETE FROM transactions WHERE username = ?", (user,))
     conn.commit(); conn.close()
 
 # ==========================================
-# 3. AI LOGIC ENGINE (With Hybrid Local Filtering)
+# 3. HYBRID AI ENGINE (The Final Solution)
 # ==========================================
-def process_user_input(user_text, df):
-    # 優化 1：本地過濾打招呼，節省 API 額度
-    greetings = ["hi", "hello", "你好", "hey", "thanks", "謝謝", "早上好", "晚安"]
-    if user_text.lower().strip() in greetings:
-        return {"intent": "chat", "chat_reply": "Hello! I'm your AI finance assistant. I'm ready to log your expenses or analyze your spending history."}
+def local_fallback_parse(text):
+    """【終極保底】如果 API 掛掉，使用 Regex 強行解析"""
+    nums = re.findall(r'\d+\.?\d*', text.replace(',', ''))
+    amount = float(nums[0]) if nums else 0.0
+    category = "Others"
+    t = text.lower()
+    if any(k in t for k in ["food", "eat", "lunch", "dinner", "cafe", "meal"]): category = "Food"
+    elif any(k in t for k in ["bus", "taxi", "uber", "gas", "transport"]): category = "Transport"
+    elif any(k in t for k in ["rent", "home", "housing", "water", "bill"]): category = "Housing"
+    elif any(k in t for k in ["movie", "game", "spotify", "fun"]): category = "Entertainment"
+    return {"intent": "log", "amount": amount, "category": category, "description": text, "is_fallback": True}
 
-    if not MY_API_KEY: return None
-    
+def process_user_input(user_text, df):
+    # 本地快速過濾打招呼
+    greetings = ["hi", "hello", "你好", "hey", "thanks", "謝謝"]
+    if user_text.lower().strip() in greetings:
+        return {"intent": "chat", "chat_reply": "Hello! I'm your AI Finance Assistant. How can I help you today?"}
+
+    if not MY_API_KEY: return local_fallback_parse(user_text)
+
     try:
         client = genai.Client(api_key=MY_API_KEY)
-        # 提供歷史資料給 AI 進行 RAG 分析
-        history = df.tail(15).to_string(index=False) if not df.empty else "No transactions logged yet."
+        history = df.tail(15).to_string(index=False) if not df.empty else "No history."
+        prompt = f"""Analyze input: "{user_text}". History: {history}. 
+        Return JSON ONLY: {{'intent': 'log', 'amount': 100, 'category': 'Food/Transport/Housing/Entertainment/Others', 'description': 'text'}} 
+        or {{'intent': 'chat', 'chat_reply': 'advice'}}"""
         
-        prompt = f"""You are 'FinSight AI', a professional finance assistant.
-        Transaction History: {history}
-        User Input: "{user_text}"
-        
-        Task: Analyze intent and return STRICT JSON ONLY.
-        If Logging: {{"intent": "log", "amount": 100.0, "category": "Food/Transport/Housing/Entertainment/Others", "description": "text"}}
-        If Question: {{"intent": "chat", "chat_reply": "your advice based on history"}}
-        No markdown, no conversation outside JSON.
-        """
-        
-        time.sleep(1.5) # 頻率限制防禦
-        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-        
-        # 使用正則強行提取 JSON，防止 AI 回傳額外文字導致解析失敗
+        time.sleep(1.5) # 防 429 頻率限制
+        response = client.models.generate_content(model='gemini-1.5-flash', contents=prompt)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        return json.loads(match.group(0)) if match else None
-        
-    except Exception as e:
-        if "429" in str(e): return {"intent": "chat", "chat_reply": "⚠️ API limit reached. Please wait 10 seconds or use the Quick View analysis."}
-        return None
+        if match: return json.loads(match.group(0))
+        raise Exception("Format Error")
+    except:
+        # API 失敗（包含 429）時，自動觸發保底，保證功能不中斷
+        return local_fallback_parse(user_text)
 
 # ==========================================
-# 4. MAIN APPLICATION UI
+# 4. MAIN UI SYSTEM
 # ==========================================
 def main():
     st.set_page_config(page_title="FinSight Pro", layout="wide", page_icon="💰")
-    apply_custom_style()
-    init_db()
+    apply_custom_style(); init_db()
 
     if "logged_in" not in st.session_state: 
         st.session_state.update({"logged_in": False, "username": None, "messages": []})
 
-    # --- 登入/註冊頁面 ---
     if not st.session_state.logged_in:
-        st.markdown("<h1 style='text-align: center;'>💰 FinSight Pro</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: grey;'>The Smartest AI Personal Finance Tool</p>", unsafe_allow_html=True)
-        
+        st.title("💰 FinSight Pro - Access")
         col_l, col_m, col_r = st.columns([1, 2, 1])
         with col_m:
             choice = st.radio("Action", ["Login", "Signup"], horizontal=True)
             u = st.text_input("Username")
             p = st.text_input("Password", type='password')
-            if st.button("Enter Dashboard"):
+            if st.button("Access Dashboard"):
                 if choice == "Signup":
-                    if add_user(u, p): st.success("Account created! Please Login.")
-                    else: st.error("Account creation failed (User might exist).")
-                elif u and p:
-                    if login_user(u, p):
-                        st.session_state.update({"logged_in": True, "username": u})
-                        st.rerun()
-                    else: st.error("Access denied. Please check your credentials.")
-    
-    # --- 已登入主介面 ---
+                    if add_user(u, p): st.success("Success! Please Login.")
+                    else: st.error("User exists or error.")
+                elif login_user(u, p):
+                    st.session_state.update({"logged_in": True, "username": u}); st.rerun()
+                else: st.error("Denied.")
     else:
         username = st.session_state.username
         df = get_user_transactions(username)
 
         # 側邊欄：快速分析與管理
         with st.sidebar:
-            st.image("https://cdn-icons-png.flaticon.com/512/1611/1611179.png", width=70)
-            st.title(f"Hi, {username}!")
-            
-            st.subheader("⚡ Quick Insights (No API)")
+            st.title(f"👋 Hi, {username}!")
             if not df.empty:
-                st.info(f"Total Spent: ${df['amount'].sum():,.1f}")
-                st.info(f"Top Category: {df.groupby('category')['amount'].sum().idxmax()}")
-            
+                st.subheader("⚡ Quick Insights")
+                st.info(f"Total spent: ${df['amount'].sum():,.1f}")
+                top_c = df.groupby('category')['amount'].sum().idxmax()
+                st.info(f"Main Expense: {top_c}")
             st.divider()
-            with st.expander("⚙️ Management"):
-                if st.button("🗑️ Clear All Data"):
-                    clear_user_data(username); st.session_state.messages = []; st.rerun()
-                if st.button("Logout"): 
-                    st.session_state.update({"logged_in": False, "username": None, "messages": []})
-                    st.rerun()
+            if st.button("🗑️ Clear My Data"): 
+                clear_user_data(username); st.session_state.messages = []; st.rerun()
+            if st.button("Logout"): 
+                st.session_state.update({"logged_in": False, "username": None, "messages": []}); st.rerun()
 
-        # 頂部核心指標指標
+        # 頂部核心指標
         st.title("💼 Financial Dashboard")
         m1, m2, m3 = st.columns(3)
         total_val = df['amount'].sum() if not df.empty else 0
-        count_val = len(df)
-        top_cat = df.groupby('category')['amount'].sum().idxmax() if not df.empty else "N/A"
-        
-        m1.metric("Total Expenses", f"${total_val:,.1f}")
-        m2.metric("Records", count_val)
-        m3.metric("Top Category", top_cat)
-
+        m1.metric("Total Spending", f"${total_val:,.1f}")
+        m2.metric("Total Records", len(df))
+        m3.metric("Top Category", df.groupby('category')['amount'].sum().idxmax() if not df.empty else "N/A")
         st.divider()
 
-        # 分頁系統：聊天 vs 數據報表
-        tab_chat, tab_data = st.tabs(["💬 AI Assistant", "📊 Analytics & Export"])
+        # 分頁標籤
+        tab_chat, tab_data = st.tabs(["💬 AI Assistant", "📊 Detailed Analytics"])
 
         with tab_chat:
-            # 顯示對話歷史紀錄
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-            if prompt := st.chat_input("Log an expense (e.g., Spent $20 on Pizza)..."):
+            if prompt := st.chat_input("Log expense (e.g., Spent $50 on Food)..."):
                 st.chat_message("user").markdown(prompt)
                 st.session_state.messages.append({"role": "user", "content": prompt})
-                
-                with st.spinner("AI is analyzing..."):
+                with st.spinner("Analyzing..."):
                     res = process_user_input(prompt, df)
-                    if res:
-                        if res.get("intent") == "log" and res.get("amount") is not None:
-                            insert_transaction(res['amount'], res['category'], res['description'], username)
-                            msg = f"✅ **Logged successfully:** ${res['amount']} for {res['category']}"
-                            st.session_state.messages.append({"role": "assistant", "content": msg})
-                            st.rerun() # 自動重載更新頂部 Metric 與圖表
-                        elif res.get("intent") == "chat":
-                            reply = res.get("chat_reply", "I've analyzed your data.")
-                            st.chat_message("assistant").markdown(reply)
-                            st.session_state.messages.append({"role": "assistant", "content": reply})
-                    else: st.error("AI service is currently busy. Try again or use Quick Insights.")
+                    if res and res.get("intent") == "log":
+                        insert_transaction(res['amount'], res['category'], res['description'], username)
+                        tag = " (AI)" if not res.get("is_fallback") else " (Fail-safe)"
+                        msg = f"✅ **Logged successfully:** ${res['amount']} for {res['category']}{tag}"
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                        st.rerun()
+                    elif res and res.get("intent") == "chat":
+                        reply = res.get("chat_reply", "Processed.")
+                        st.chat_message("assistant").markdown(reply)
+                        st.session_state.messages.append({"role": "assistant", "content": reply})
 
         with tab_data:
             if not df.empty:
-                # 互動式 Plotly 圓餅圖
-                fig = px.pie(df, values='amount', names='category', hole=0.4,
-                             title="Expense Distribution by Category",
-                             color_discrete_sequence=px.colors.qualitative.Safe)
+                # Plotly 互動式圖表
+                fig = px.pie(df, values='amount', names='category', hole=0.4, title="Spending Distribution")
                 st.plotly_chart(fig, use_container_width=True)
-                
-                st.divider()
-                st.subheader("📝 Transaction History")
+                # 歷史數據表格
+                st.subheader("Transaction History")
                 st.dataframe(df, use_container_width=True)
-                
-                # CSV 下載按鈕
-                csv_file = df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Download Financial Report (CSV)", csv_file, "fin_report.csv", "text/csv")
+                # 一鍵匯出 CSV
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download Data (CSV)", csv, f"fin_report_{username}.csv", "text/csv")
             else:
-                st.warning("No data found. Start logging your expenses in the Chat tab!")
+                st.warning("No data found. Start logging in the Chat tab!")
 
 if __name__ == "__main__":
     main()
